@@ -1,0 +1,281 @@
+%% CALCIUM DATA ANALYSIS FOR SKELETAL MYOTUBES
+
+clearvars; clc; close all;
+
+%% Choose file to analyze
+[file_raw, path_raw] = uigetfile({'*.xlsx','Excel'},'Select excel file to analyze','MultiSelect','off');
+cd(path_raw)
+
+prompt = {'Enter the title of the workbook sheet you woould like to analyze'};
+dlgtitle1 = 'Workbook sheet';
+definput1 = {'1'};
+sheet = inputdlg(prompt,dlgtitle1,[1 50],definput1);
+
+prompt = {'How many peaks would you like to average?'};
+dlgtitle2 = 'Sample size';
+definput2 = {'5'};
+nu = inputdlg(prompt,dlgtitle2,[1 50],definput2);
+num = str2double(nu{1});
+
+%% Load Data
+[~, file_name, file_ext] = fileparts(file_raw);
+VIDEONAME = char(file_raw);
+    [pathstr, name, ext] = fileparts(VIDEONAME);
+    workingDir = strcat(name,'data');
+
+% create save folder
+save_folder = [path_raw file_name '_' char(sheet) '_ca_analysis/'];
+mkdir(save_folder)
+
+% import data
+if strcmp(sheet,'1')
+    ca_data = readtable(file_raw); 
+else 
+    ca_data = readtable(file_raw,'Sheet',char(sheet)); 
+end
+Time = table2array(ca_data(:,2));
+ca_raw = table2array(ca_data(:,6));
+background_F = table2array(ca_data(:,7));
+ca_rel = ca_raw - background_F;
+ca_norm = (ca_rel - min(ca_rel))./range(ca_rel);
+nFrames = length(Time);
+
+%% filtering
+
+%%% Make low pass filter (above  1 / beat duration ) because tracking with is noisy 
+Upper_Frequency = 6.0; %Hz (for noise)
+%%% other imput needed for filter
+order=4;        %% order of filter
+SampleRate=length(Time)/Time(end); %Hz
+%%% make the filter
+[BBlow,AAlow] = butter(order,Upper_Frequency/(SampleRate/2),'low');
+
+nf = 1;
+
+if length(ca_rel)>1
+        ca_rel_filt = filtfilt(BBlow,AAlow,ca_rel);
+end   
+    figure(nf)
+    title(char(workingDir),'Fontsize',16);
+    plot(Time,ca_rel); hold on
+    plot(Time,ca_rel_filt)
+    legend('raw','filtered')
+    ylabel({'F - F_{background}'},'Fontsize',16)
+    xlabel('Time (sec)','Fontsize',16)
+    set(gca,'fontsize',14)
+
+ask_filt = questdlg({'Proceed with filtered data?'});
+if strcmp(ask_filt, 'Yes')
+    ca_rel = ca_rel_filt;
+end 
+
+%% DATA ANALYSIS
+fprintf('*** BEGIN Data Analysis\n')
+
+% while true
+
+start_pct = 0.03;
+base_pct = 0.1;
+
+caI_peaks_init = peakfinder(ca_rel);
+if caI_peaks_init(end) == nFrames
+    caI_peaks_init = caI_peaks_init(1:end-1);
+end
+
+if length(caI_peaks_init) == 1
+    [~,caI_troughs(1)] = min(ca_rel(1:caI_peaks_init(1)));
+    [~,caI_troughs(2)] = min(ca_rel(caI_peaks_init(1):end));
+    
+    caI_troughs(2) = caI_troughs(2) + caI_peaks_init(1) - 1;
+    
+    caI_peaks = caI_peaks_init;
+elseif length(caI_peaks_init) == 2
+    [~,caI_troughs(1)] = min(ca_rel(1:caI_peaks_init(1)));
+    [~,caI_troughs(2)] = min(ca_rel(caI_peaks_init(1):caI_peaks_init(2)));
+    [~,caI_troughs(3)] = min(ca_rel(caI_peaks_init(2):end));
+    
+    caI_troughs(2) = caI_troughs(2) + caI_peaks_init(1) - 1;
+    caI_troughs(3) = caI_troughs(3) + caI_peaks_init(2) - 1;
+    
+    caI_peaks = caI_peaks_init;
+else
+    caI_troughs = zeros(length(caI_peaks_init),1);
+    for np = 1:length(caI_peaks_init)-1
+        [~,caI_troughs(np,1)] = min(ca_rel(caI_peaks_init(np):caI_peaks_init(np + 1)));
+        caI_troughs(np,1) = caI_troughs(np) + caI_peaks_init(np) - 1;
+    end
+    np = np + 1;
+    [~,caI_troughs(np,1)] = min(ca_rel(caI_peaks_init(np):end));
+    caI_troughs(np,1) = caI_troughs(np) + caI_peaks_init(np) - 1;
+
+    if (caI_peaks_init(1) >= 0.9*mean(caI_peaks_init(2:end-1) - caI_troughs(1:end-2)))
+        [~,first_trough] = min(ca_rel(1:caI_peaks_init(1)));
+
+        if first_trough == 1 %  get rid of first beat if trough is first point
+            caI_peaks = caI_peaks_init(2:end);
+        else
+            caI_peaks = caI_peaks_init(1:end);
+            caI_troughs = [first_trough; caI_troughs];
+        end
+    else % remove first beat if it is too close to starting time
+        caI_peaks = caI_peaks_init(2:end);
+    end
+
+    if ((nFrames - caI_peaks(end)) < 0.9*mean(caI_troughs(2:end-1) - caI_peaks(1:end-1)))
+        % remove last beat if it is too close to ending time
+        caI_peaks = caI_peaks(1:end-1);
+        caI_troughs = caI_troughs(1:end-1);
+    end
+end
+
+for np = 1:length(caI_peaks)
+    i_L = caI_troughs(np);
+    i_R = caI_troughs(np + 1);
+    temp_ca_rel = ca_rel(i_L:caI_peaks(np));
+    caV_baselines_pre(np,1) = median(temp_ca_rel(temp_ca_rel < (base_pct*(max(temp_ca_rel) - min(temp_ca_rel)) + min(temp_ca_rel))));
+    temp_ca_rel = ca_rel(caI_peaks(np):i_R);
+    caV_baselines_post(np,1) = median(temp_ca_rel(temp_ca_rel < (base_pct*(max(temp_ca_rel) - min(temp_ca_rel)) + min(temp_ca_rel))));
+    
+    caI_start(np,1) = find(ca_rel(i_L:caI_peaks(np)) < (start_pct*(ca_rel(caI_peaks(np)) - caV_baselines_pre(np)) + caV_baselines_pre(np)),1,'Last');
+    caI_start(np,1) = caI_start(np) + i_L - 1;
+    
+    if (caI_start(np) - i_L) < 0.2*mean(diff(caI_peaks))
+        caV_baselines_pre(np,1) = ca_rel(i_L);
+        caI_start(np,1) = find(ca_rel(i_L:caI_peaks(np)) < (start_pct*(ca_rel(caI_peaks(np)) - caV_baselines_pre(np)) + caV_baselines_pre(np)),1,'Last');
+        caI_start(np,1) = caI_start(np) + i_L - 1;
+        if (np > 1)
+            caV_baselines_post(np-1,1) = ca_rel(i_L);
+        end
+    end
+    
+    if np == length(caI_peaks)
+        if all(caV_baselines_post(1:length(caI_peaks)-1) == ca_rel(caI_troughs(2:length(caI_peaks-1)))) % if all previous beat starts were on a trough
+            caV_baselines_post(np,1) = ca_rel(i_R);
+        end
+    end
+
+    caI_50R(np,1) = find((ca_rel(caI_peaks(np):i_R) - ca_rel(i_R)) < 0.5*(ca_rel(caI_peaks(np)) - ca_rel(i_R)),1,'first');
+    caI_50R(np,1) = caI_50R(np) + caI_peaks(np) - 1;
+    caT_50R_i(np,1) = interp1(ca_rel([caI_50R(np)-1, caI_50R(np)]) - ca_rel(i_R),Time([caI_50R(np)-1, caI_50R(np)]),0.5*(ca_rel(caI_peaks(np)) - ca_rel(i_R)));
+    
+    caI_90R(np,1) = find((ca_rel(caI_peaks(np):i_R) - ca_rel(i_R)) < 0.1*(ca_rel(caI_peaks(np)) - ca_rel(i_R)),1,'first');
+    caI_90R(np,1) = caI_90R(np) + caI_peaks(np) - 1;
+    caT_90R_i(np,1) = interp1(ca_rel([caI_90R(np)-1, caI_90R(np)]) - ca_rel(i_R),Time([caI_90R(np)-1, caI_90R(np)]),0.1*(ca_rel(caI_peaks(np)) - ca_rel(i_R)));
+    
+    caI_10R(np,1) = find((ca_rel(caI_peaks(np):i_R) - ca_rel(i_R)) < 0.9*(ca_rel(caI_peaks(np)) - ca_rel(i_R)),1,'first');
+    caI_10R(np,1) = caI_10R(np) + caI_peaks(np) - 1;
+    caT_10R_i(np,1) = interp1(ca_rel([caI_10R(np)-1, caI_10R(np)]) - ca_rel(i_R),Time([caI_10R(np)-1, caI_10R(np)]),0.9*(ca_rel(caI_peaks(np)) - ca_rel(i_R)));
+    
+    % decay constant (tau), ?F(t)=Ae^(?t/?) ± B, fit between 50% and 90%
+    % relaxation
+    decay_c = lsqcurvefit(@(a,x) a(1)+a(2)*exp(-a(3)*x),[100 100 10],Time(caI_50R(np):caI_90R(np))-Time(caI_50R(np)),ca_rel(caI_50R(np):caI_90R(np)),[],[],...
+        optimoptions('lsqcurvefit','Display','off','MaxFunctionEvaluations',1000,'OptimalityTolerance',1e-6));
+    decay_fits(np,:) = decay_c;
+    tau(np,1) = 1/decay_c(3);
+    if tau(np,1)<0 || tau(np,1)>1 %remove tau with bad fit
+       tau(np,1) = NaN;
+       decay_fits(np,:) = NaN;
+    end
+    % accurate peak fitting
+    caI_80A(np,1) = find((ca_rel(i_L:caI_peaks(np)) - ca_rel(i_L)) < 0.8*(ca_rel(caI_peaks(np)) - ca_rel(i_L)),1,'last');
+    caI_80A(np,1) = caI_80A(np) + i_L - 1;
+    caI_20R(np,1) = find((ca_rel(caI_peaks(np):i_R) - ca_rel(i_R)) < 0.8*(ca_rel(caI_peaks(np)) - ca_rel(i_R)),1,'first');
+    caI_20R(np,1) = caI_20R(np) + caI_peaks(np) - 1;
+
+    peak_c = polyfit(Time(caI_80A(np):caI_20R(np)),ca_rel(caI_80A(np):caI_20R(np)),2);
+    peak_fits(np,:) = peak_c;
+    roots_peaks = roots(polyder(peak_c));
+    caT_peaks_i(np,1) = roots_peaks(polyval(polyder(polyder(peak_c)),roots_peaks) < 0);
+    caV_peaks_i(np,1) = polyval(peak_c,caT_peaks_i(np));
+    
+    % max up and downstroke
+    [~,caI_RMaxUp(np,1)] = max(diff(ca_rel(caI_start(np):caI_peaks(np))));
+    caI_RMaxUp(np,1) = caI_RMaxUp(np) + caI_start(np) - 1;
+    RMaxUp(np,1) = (ca_rel(caI_RMaxUp(np) + 1) - ca_rel(caI_RMaxUp(np)))/(Time(caI_RMaxUp(np) + 1) - Time(caI_RMaxUp(np)));
+    
+    [~,caI_RMaxDn(np,1)] = min(diff(ca_rel(caI_peaks(np):caI_90R(np))));
+    caI_RMaxDn(np,1) = caI_RMaxDn(np) + caI_peaks(np) - 1;
+    RMaxDn(np,1) = (ca_rel(caI_RMaxDn(np) + 1) - ca_rel(caI_RMaxDn(np)))/(Time(caI_RMaxDn(np) + 1) - Time(caI_RMaxDn(np)));
+end
+
+caT_start = Time(caI_start);
+caT_peaks = Time(caI_peaks);
+
+caV_start = ca_rel(caI_start);
+caV_peaks = ca_rel(caI_peaks);
+caV_50R_i = (0.5*(ca_rel(caI_peaks) - ca_rel(caI_troughs(2:end))) + ca_rel(caI_troughs(2:end)));
+caV_90R_i = (0.1*(ca_rel(caI_peaks) - ca_rel(caI_troughs(2:end))) + ca_rel(caI_troughs(2:end)));
+caV_10R_i = (0.9*(ca_rel(caI_peaks) - ca_rel(caI_troughs(2:end))) + ca_rel(caI_troughs(2:end)));
+
+caR_peaks = (caV_peaks - caV_start)./(caT_peaks - caT_start);
+caR_50R_i = (caV_peaks - caV_50R_i)./(caT_50R_i - caT_peaks);
+caR_90R_i = (caV_peaks - caV_90R_i)./(caT_90R_i - caT_peaks);
+caR_10R_i = (caV_peaks - caV_10R_i)./(caT_10R_i - caT_peaks);
+
+Tpeak_mean = mean(caT_peaks(1:num) - caT_start(1:num));
+T50R_mean = mean(caT_50R_i(1:num) - caT_peaks(1:num));
+T90R_mean = mean(caT_90R_i(1:num) - caT_peaks(1:num));
+T10R_mean = mean(caT_10R_i(1:num) - caT_peaks(1:num));
+
+Rpeak_mean = mean(caR_peaks(1:num));
+R50R_mean = mean(caR_50R_i(1:num));
+R90R_mean = mean(caR_90R_i(1:num));
+R10R_mean = mean(caR_10R_i(1:num));
+
+freq_mean = (length(caT_peaks) - 1)./(caT_peaks(end)-caT_peaks(1));
+
+tau_mean = mean(tau(1:num),'omitnan');
+
+RMaxUp_mean = mean(RMaxUp(1:num));
+RMaxDn_mean = mean(RMaxDn(1:num));
+
+fprintf('Success: Waveform analysis completed.\n')
+fprintf('\tAverage beat frequency = %0.4f Hz.\n',freq_mean)
+
+%%
+
+save([save_folder 'results.mat'],...
+    'caI*','caT*','caV*','caR*','caI*',...
+    'decay_fits','tau',...
+    'RMaxUp','RMaxDn',...
+    'Tpeak_mean','T50R_mean','T90R_mean','T10R_mean',...
+    'freq_mean','tau_mean',...
+    'RMaxUp_mean','RMaxDn_mean',...
+    'Rpeak_mean','R50R_mean','R90R_mean','R10R_mean',...
+    'ca_raw','ca_rel','ca_norm','background_F',...
+    'Time',...
+    'save_folder','file_name');
+
+fprintf('*** END Data Analysis\n')
+fprintf('Results saved to\n\t%s\n',[save_folder 'results.mat'])
+
+%% Plotting
+ca_plotting_skm
+
+%% Data output (for copy-paste into excel/google docs)
+fprintf(['Results\n',...
+    '%32s\n',...
+    '%32s\n\n',...
+    '%8s\n',...
+    '%8.2f\n\n',...
+    '%8s\t%8s\n',...
+    '%8.2f\t%8.3f\n\n',...
+    '%8s\t%8s\t%8s\n',...
+    '%8.2f\t%8.2f\t%8.2f\n\n',...
+    '%8s\t%8s\t%8s\n',...
+    '%8.3f\t%8.3f\t%8.3f\n\n',...
+    '%8s\t%8s\t%8s\n',...
+    '%8.3f\t%8.3f\t%8.3f\n'],...
+    'File',...
+    file_name, ...
+    'Time(s)',...
+    Time(end),...
+    'Freq(Hz)','Tau(s^-1)',...
+    freq_mean, tau_mean,...
+    'F0','Fmax','Fmax/F0',...
+    mean(caV_baselines_pre), mean(caV_peaks), mean(caV_peaks./caV_baselines_pre),...
+    'Tpeak (ms)','T50R (ms)','T90R (ms)',...
+    Tpeak_mean*1000, T50R_mean*1000, T90R_mean*1000,...
+    'Rpeak','R50R','R90R',...
+    Rpeak_mean, R50R_mean, R90R_mean)
+
