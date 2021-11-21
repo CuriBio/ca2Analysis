@@ -5,9 +5,6 @@ from scipy.signal import find_peaks, butter, sosfilt
 from numpy.polynomial.polynomial import polyfit, Polynomial
 # import openpyxl
 
-# TODO: return time parameters:
-#       average time to 50, 90 and 100 % contraction and relaxation 
-#       (trough to peak and peak to trough respectively)
 
 # TODO: check there are no double peaks or troughs.
 #       would need to use the peak and trough indicies
@@ -20,6 +17,26 @@ from numpy.polynomial.polynomial import polyfit, Polynomial
 #       the alterniative is to just throw a tuple ('peak or trough', index) into a list
 #       and sort on the index then step through the list and ensure we alternate
 
+# TODO: IF the current method of estimate the various metrics where we
+#       use a polynomial fit and then find the roots of the poly FAILS,
+#       numpy warnings such as the rank is blah or the fit is ill-conditioned etc ... 
+#       we will have to use a method like:
+#       take the polynomial coefficients and perform a search of the function
+#       between the start and end times
+#       could do this with a bisection and stop when the step size < some tol in seconds say 0.001
+#       or we could do a multi grid search i.e step size of 0.1 second
+#       then 0.01 second between the points we narrowed it to
+#       then 0.001 between the subsequent points we narrow it to, etc
+#       if the fit still fails, we'd have to find the two closest time points that the
+#       metric parameter lives between, and linear iteropolate between those two points
+#       to find the point the metric is for. this would clearly be inferiour since
+#       we know most of these signals have exponential or polynomial shape and
+#       a linear interpolation between two points (even if close) isn't a great fit.
+#       or, 
+#       the alternative is to use splines which do essentially the same thing
+#       without having to explicitly code the linear interpolation, but since we have to 
+#       compute enough splines to for the resolution we need computationally very expensive
+
 
 def pointToPointMetrics(
     start_point_indices: np.ndarray,
@@ -28,36 +45,28 @@ def pointToPointMetrics(
     point_times: np.ndarray
 ) -> Dict:
     endpoint_value_fractions = np.asarray([0.5, 0.9], dtype=np.float32)
-    num_metrics_to_compute = len(endpoint_value_fractions) + 1  # +1 for 100%
+    num_metrics_to_compute = len(endpoint_value_fractions) + 1  # +1 for 100% case
     num_point_values = len(start_point_indices)
     metrics = np.zeros(shape=(num_metrics_to_compute, num_point_values), dtype=np.float32)
+    metric_failure_counter = np.zeros(shape=(num_metrics_to_compute), dtype=np.float32)
 
     for point_index in range(len(start_point_indices)):
-    # for point_index in range(2, len(start_point_indices)):
-        # print('------------------------------------------------------')
-        # print('start of point to point')
         start_point_index = start_point_indices[point_index]
         end_point_index = end_point_indices[point_index] + 1
         start_time = point_times[start_point_index]
         points_to_fit_poly_at = point_times[start_point_index:end_point_index] - start_time  # shift times to 0
         value_of_points_to_fit = point_values[start_point_index:end_point_index]
 
-        # print(f'points_to_fit_poly_at: {points_to_fit_poly_at}')
-        # print(f'value_of_points_to_fit: {value_of_points_to_fit}')
-
         start_time = points_to_fit_poly_at[0]
         end_time = points_to_fit_poly_at[-1]
-        # print(f'end_time: {end_time}')
         metrics[-1, point_index] = end_time
         
         num_points_for_fit = len(points_to_fit_poly_at)
-        if num_points_for_fit > 2:
+        if num_points_for_fit > 5:
             polyfit_deg = 3
         else:
-            polyfit_deg = 1
+            polyfit_deg = 2
 
-        # polyfit_of_values = np.polyfit(points_to_fit_poly_at, value_of_points_to_fit, polyfit_deg)  
-        # poly = np.poly1d(polyfit_of_values)
         polyfit_of_values = Polynomial.fit(
             points_to_fit_poly_at,
             value_of_points_to_fit,
@@ -66,55 +75,35 @@ def pointToPointMetrics(
             window=[start_time, end_time]
         )
         poly = Polynomial(polyfit_of_values.convert().coef)
-        # print(f'poly: {poly}')
         
         start_point_time = points_to_fit_poly_at[0]
         end_point_time = points_to_fit_poly_at[-1]
         start_point_value = value_of_points_to_fit[0]
         end_point_value = value_of_points_to_fit[-1]
         point_to_point_value = end_point_value - start_point_value
-        # print(f'value (start, end, range): {start_point_value}, {end_point_value}, {point_to_point_value}')
         for fraction_id_to_add in range(len(endpoint_value_fractions)):
             fraction_of_value = endpoint_value_fractions[fraction_id_to_add]
             fractional_value = start_point_value + fraction_of_value*point_to_point_value
-
-            # print(f'fraction_id_to_add: {fraction_id_to_add}')
-            # print(f'fraction_of_value: {fraction_of_value}')
-
-            # TODO: take the polynomial coefficients and perform a search of the function
-            #       between the start and end times
-            #       could do this with a bisection and stop when the step size < some tol in seconds say 0.001
-            #       or we could do a multi grid search i.e step size of 0.1 second
-            #       then 0.01 second between the points we narrowed it to
-            #       then 0.001 between the subsequent points we narrow it to, etc
-
-            roots = (poly - fractional_value).roots
             roots = Polynomial.roots(poly - fractional_value)
-
-            # print(f'roots: {roots}')
-            # print(f'fractional_value: {fractional_value}')            
+            failure_count = 1.0
             for root in roots:
                 if np.iscomplex(root):
-                    continue  # only true if imaginary part is non zero (could still be a complex number object) 
+                    continue  # only true if imaginary part is non zero (could still be a complex num object) 
                 if root < start_point_time or root > end_point_time:
                     continue
-                # print(f'value at fractional: {poly(root)}')
-                metrics[fraction_id_to_add, point_index] = np.real(root)  # could be imaginary obj with imaginary part 0 
+                metrics[fraction_id_to_add, point_index] = np.real(root)  # could be complex num obj with imaginary part 0
+                failure_count = 0.0
                 break
-        # print(metrics[:,point_index])
+            metric_failure_counter[fraction_id_to_add] += failure_count
 
-    # print('end of point to point')
-    # print('------------------------------------------------------')
-    # print()
-
-    # metrics_for_100 = metrics[-1, :]
-    # print(f'100% metrics: {metrics_for_100}')
-    metric_means = np.mean(metrics, axis=-1)
-    # print(f'metric_means: {metric_means}')
-    # exit()
+    metrics_counters = np.abs(metric_failure_counter - num_point_values)
+    metrics_sums = np.sum(metrics, axis=-1)
+    metrics_means = metrics_sums/metrics_counters
+    metrics_failure_proportions = metric_failure_counter/num_point_values
     return {
         'p2p_metric_data': metrics,
-        'mean_metric_data': metric_means 
+        'mean_metric_data': metrics_means,
+        'metric_failure_proportions': metrics_failure_proportions
     }
 
 
@@ -153,7 +142,6 @@ def ca2Metrics(
         point_times=time_stamps
     )
     trough_to_peak_metrics['p2p_order'] = 'trough_to_peak'
-    # trough_to_peak_metrics = {'p2p_order': 'trough_to_peak'}
 
     # compute the peak to trough metrics
     peak_sequence_start = 0
