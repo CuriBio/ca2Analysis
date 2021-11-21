@@ -33,6 +33,7 @@ def pointToPointMetrics(
     metrics = np.zeros(shape=(num_metrics_to_compute, num_point_values), dtype=np.float32)
 
     for point_index in range(len(start_point_indices)):
+    # for point_index in range(2, len(start_point_indices)):
         # print('------------------------------------------------------')
         # print('start of point to point')
         start_point_index = start_point_indices[point_index]
@@ -44,20 +45,27 @@ def pointToPointMetrics(
         # print(f'points_to_fit_poly_at: {points_to_fit_poly_at}')
         # print(f'value_of_points_to_fit: {value_of_points_to_fit}')
 
-        total_time = points_to_fit_poly_at[-1]
-        # print(f'total_time: {total_time}')
-        metrics[-1, point_index] = total_time
+        start_time = points_to_fit_poly_at[0]
+        end_time = points_to_fit_poly_at[-1]
+        # print(f'end_time: {end_time}')
+        metrics[-1, point_index] = end_time
         
         num_points_for_fit = len(points_to_fit_poly_at)
-        if num_points_for_fit > 20:
-            polyfit_deg = 2
+        if num_points_for_fit > 2:
+            polyfit_deg = 3
         else:
             polyfit_deg = 1
 
         # polyfit_of_values = np.polyfit(points_to_fit_poly_at, value_of_points_to_fit, polyfit_deg)  
         # poly = np.poly1d(polyfit_of_values)
-        polyfit_of_values = Polynomial.fit(points_to_fit_poly_at, value_of_points_to_fit, polyfit_deg)
-        poly = Polynomial(polyfit_of_values)
+        polyfit_of_values = Polynomial.fit(
+            points_to_fit_poly_at,
+            value_of_points_to_fit,
+            polyfit_deg,
+            domain=[start_time, end_time],
+            window=[start_time, end_time]
+        )
+        poly = Polynomial(polyfit_of_values.convert().coef)
         # print(f'poly: {poly}')
         
         start_point_time = points_to_fit_poly_at[0]
@@ -65,7 +73,7 @@ def pointToPointMetrics(
         start_point_value = value_of_points_to_fit[0]
         end_point_value = value_of_points_to_fit[-1]
         point_to_point_value = end_point_value - start_point_value
-        # print(f'time (start, end, range): {start_point_value}, {end_point_value}, {point_to_point_value}')
+        # print(f'value (start, end, range): {start_point_value}, {end_point_value}, {point_to_point_value}')
         for fraction_id_to_add in range(len(endpoint_value_fractions)):
             fraction_of_value = endpoint_value_fractions[fraction_id_to_add]
             fractional_value = start_point_value + fraction_of_value*point_to_point_value
@@ -80,26 +88,30 @@ def pointToPointMetrics(
             #       then 0.01 second between the points we narrowed it to
             #       then 0.001 between the subsequent points we narrow it to, etc
 
-            # roots = (poly - fractional_value).roots
+            roots = (poly - fractional_value).roots
             roots = Polynomial.roots(poly - fractional_value)
 
             # print(f'roots: {roots}')
             # print(f'fractional_value: {fractional_value}')            
             for root in roots:
-                if root > start_point_time and root < end_point_time:
-                    # print(f'value at fractional: {poly(root)}')
-                    metrics[fraction_id_to_add, point_index] = root
-                    break
-            print(metrics[:,point_index])
+                if np.iscomplex(root):
+                    continue  # only true if imaginary part is non zero (could still be a complex number object) 
+                if root < start_point_time or root > end_point_time:
+                    continue
+                # print(f'value at fractional: {poly(root)}')
+                metrics[fraction_id_to_add, point_index] = np.real(root)  # could be imaginary obj with imaginary part 0 
+                break
+        # print(metrics[:,point_index])
 
-        # print('end of point to point')
-        # print('------------------------------------------------------')
-        # print()
+    # print('end of point to point')
+    # print('------------------------------------------------------')
+    # print()
 
     # metrics_for_100 = metrics[-1, :]
     # print(f'100% metrics: {metrics_for_100}')
     metric_means = np.mean(metrics, axis=-1)
-
+    # print(f'metric_means: {metric_means}')
+    # exit()
     return {
         'p2p_metric_data': metrics,
         'mean_metric_data': metric_means 
