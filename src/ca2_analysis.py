@@ -1,29 +1,169 @@
 import numpy as np
 import pandas as pd
-from typing import Tuple
+from typing import Tuple, Dict, List
 from scipy.signal import find_peaks, butter, sosfilt
+from numpy.polynomial.polynomial import polyfit, Polynomial
 # import openpyxl
 
+# TODO: return time parameters:
+#       average time to 50, 90 and 100 % contraction and relaxation 
+#       (trough to peak and peak to trough respectively)
 
-def lowPassFiltered(input_signal: np.ndarray, time_stamps: np.ndarray) -> np.ndarray:
-    filter_order = 5  # how sharply the filter cuts off the larger the sharper it bends
-    # frequency_range_hz = [1.0, 2.0]  # cut off frequency [start, stop] for bandpass/bandstop
-    frequency_hz = 1.5
-    duration = time_stamps[-1] - time_stamps[0]
-    num_samples = len(time_stamps)
-    sampleing_frequency = float(num_samples)/duration
-    sos = butter(filter_order, frequency_hz, 'lowpass', fs=sampleing_frequency, output='sos')
-    return sosfilt(sos, input_signal)
-
-
-def extremePointIndices(signal: np.ndarray) -> Tuple[np.ndarray]:
-    peaks, troughs = peaksAndTroughsIndices(signal)
-    peaks_and_troughs = np.concatenate((peaks, troughs), axis=0)
-    peaks_and_troughs_sorted = np.sort(peaks_and_troughs)
-    return (peaks, troughs, peaks_and_troughs_sorted)
+# TODO: check there are no double peaks or troughs.
+#       would need to use the peak and trough indicies
+#       find if the peak or trough is first
+#       then oscilate between peaks and troughs ensuring
+#       the values in time_stamps of the alternating sequence
+#       of peak and trough indicies forms a strictly monotonically increase sequence
+#       i.e. from one to the next the time is always greater
+#       because if there is ever a double peak, the alternating sequence wont be monotonically increasing
+#       the alterniative is to just throw a tuple ('peak or trough', index) into a list
+#       and sort on the index then step through the list and ensure we alternate
 
 
-def peaksAndTroughsIndices(
+def pointToPointMetrics(
+    start_point_indices: np.ndarray,
+    end_point_indices: np.ndarray,
+    point_values: np.ndarray,
+    point_times: np.ndarray
+) -> Dict:
+    endpoint_value_fractions = np.asarray([0.5, 0.9], dtype=np.float32)
+    num_metrics_to_compute = len(endpoint_value_fractions) + 1  # +1 for 100%
+    num_point_values = len(start_point_indices)
+    metrics = np.zeros(shape=(num_metrics_to_compute, num_point_values), dtype=np.float32)
+
+    for point_index in range(len(start_point_indices)):
+        # print('------------------------------------------------------')
+        # print('start of point to point')
+        start_point_index = start_point_indices[point_index]
+        end_point_index = end_point_indices[point_index] + 1
+        start_time = point_times[start_point_index]
+        points_to_fit_poly_at = point_times[start_point_index:end_point_index] - start_time  # shift times to 0
+        value_of_points_to_fit = point_values[start_point_index:end_point_index]
+
+        # print(f'points_to_fit_poly_at: {points_to_fit_poly_at}')
+        # print(f'value_of_points_to_fit: {value_of_points_to_fit}')
+
+        total_time = points_to_fit_poly_at[-1]
+        # print(f'total_time: {total_time}')
+        metrics[-1, point_index] = total_time
+        
+        num_points_for_fit = len(points_to_fit_poly_at)
+        if num_points_for_fit > 20:
+            polyfit_deg = 2
+        else:
+            polyfit_deg = 1
+
+        # polyfit_of_values = np.polyfit(points_to_fit_poly_at, value_of_points_to_fit, polyfit_deg)  
+        # poly = np.poly1d(polyfit_of_values)
+        polyfit_of_values = Polynomial.fit(points_to_fit_poly_at, value_of_points_to_fit, polyfit_deg)
+        poly = Polynomial(polyfit_of_values)
+        # print(f'poly: {poly}')
+        
+        start_point_time = points_to_fit_poly_at[0]
+        end_point_time = points_to_fit_poly_at[-1]
+        start_point_value = value_of_points_to_fit[0]
+        end_point_value = value_of_points_to_fit[-1]
+        point_to_point_value = end_point_value - start_point_value
+        # print(f'time (start, end, range): {start_point_value}, {end_point_value}, {point_to_point_value}')
+        for fraction_id_to_add in range(len(endpoint_value_fractions)):
+            fraction_of_value = endpoint_value_fractions[fraction_id_to_add]
+            fractional_value = start_point_value + fraction_of_value*point_to_point_value
+
+            # print(f'fraction_id_to_add: {fraction_id_to_add}')
+            # print(f'fraction_of_value: {fraction_of_value}')
+
+            # TODO: take the polynomial coefficients and perform a search of the function
+            #       between the start and end times
+            #       could do this with a bisection and stop when the step size < some tol in seconds say 0.001
+            #       or we could do a multi grid search i.e step size of 0.1 second
+            #       then 0.01 second between the points we narrowed it to
+            #       then 0.001 between the subsequent points we narrow it to, etc
+
+            # roots = (poly - fractional_value).roots
+            roots = Polynomial.roots(poly - fractional_value)
+
+            # print(f'roots: {roots}')
+            # print(f'fractional_value: {fractional_value}')            
+            for root in roots:
+                if root > start_point_time and root < end_point_time:
+                    # print(f'value at fractional: {poly(root)}')
+                    metrics[fraction_id_to_add, point_index] = root
+                    break
+            print(metrics[:,point_index])
+
+        # print('end of point to point')
+        # print('------------------------------------------------------')
+        # print()
+
+    # metrics_for_100 = metrics[-1, :]
+    # print(f'100% metrics: {metrics_for_100}')
+    metric_means = np.mean(metrics, axis=-1)
+
+    return {
+        'p2p_metric_data': metrics,
+        'mean_metric_data': metric_means 
+    }
+
+
+def ca2Metrics(
+    value_data: np.ndarray,
+    time_stamps: np.ndarray=None,
+    expected_frequency_hz: float=None,
+    expected_min_peak_width: int=None,
+    expected_min_peak_height: float=None    
+) -> Tuple[Dict]:
+
+    peak_indices, trough_indices = peakAndTroughIndices(
+        value_data,
+        time_stamps,
+        expected_frequency_hz=expected_frequency_hz,
+        expected_min_peak_width=expected_min_peak_width,
+        expected_min_peak_height=expected_min_peak_height
+    )
+
+    first_peak_time = time_stamps[peak_indices[0]]
+    first_trough_time = time_stamps[trough_indices[0]]
+
+    # compute the trough to peak metrics
+    trough_sequence_start = 0
+    if first_trough_time < first_peak_time:
+        peak_sequence_start = 0
+    else:
+        peak_sequence_start = 1
+    num_troughs = len(trough_indices)
+    num_useable_peaks = len(peak_indices) - peak_sequence_start
+    num_troughs_to_use = min(num_troughs, num_useable_peaks)
+    trough_to_peak_metrics = pointToPointMetrics(
+        start_point_indices=trough_indices[trough_sequence_start: trough_sequence_start + num_troughs_to_use],
+        end_point_indices=peak_indices[peak_sequence_start: peak_sequence_start + num_troughs_to_use],
+        point_values=value_data,
+        point_times=time_stamps
+    )
+    trough_to_peak_metrics['p2p_order'] = 'trough_to_peak'
+    # trough_to_peak_metrics = {'p2p_order': 'trough_to_peak'}
+
+    # compute the peak to trough metrics
+    peak_sequence_start = 0
+    if first_peak_time < first_trough_time:
+        trough_sequence_start = 0
+    else:
+        trough_sequence_start = 1
+    num_peaks = len(peak_indices)
+    num_useable_troughs = len(trough_indices) - trough_sequence_start
+    num_peaks_to_use = min(num_peaks, num_useable_troughs)
+    peak_to_trough_metrics = pointToPointMetrics(
+        start_point_indices=peak_indices[peak_sequence_start: peak_sequence_start + num_peaks_to_use],
+        end_point_indices=trough_indices[trough_sequence_start: trough_sequence_start + num_peaks_to_use],
+        point_values=value_data,
+        point_times=time_stamps
+    )
+    peak_to_trough_metrics['p2p_order'] = 'peak_to_trough'
+
+    return (trough_to_peak_metrics, peak_to_trough_metrics)
+
+
+def peakAndTroughIndices(
     input_data: np.ndarray,
     time_stamps: np.ndarray=None,
     expected_frequency_hz: float=None,
@@ -42,16 +182,21 @@ def peaksAndTroughsIndices(
         pacing_frquency_min_hz = expected_frequency_hz - expected_frequency_range_hz
         pacing_frquency_max_hz = expected_frequency_hz + expected_frequency_range_hz
 
-        # compute the expected width (in samples) from peak to peak (or trough to trough)
+        # compute the width (in samples) from peak to peak or trough to trough that we expect the
+        # signal to contain so we can eliminate noise components we presume will be shorter than this
         duration = time_stamps[-1] - time_stamps[0]
         num_samples = len(time_stamps)
         sampling_rate = float(num_samples)/duration
         expected_min_peak_width = sampling_rate/pacing_frquency_max_hz
 
-        # compute the expected height from peak to peak (or trough to trough)
-        # this is probably not necessary and is much harder to estimate than expected width
-        # so it might cause problems with highly decaying signals and/or signals with large noise.
-        # in particular, the use of half the calculated height of the middle-ish peak is entirely arbitrary
+        # compute the height from trough to peak or peak to trough that we expect the signal to contain.
+        # we use this to eliminate noise components we pressume will be smaller than this.
+        # note: it is probably not necessary to pass this parameter to the peak finder; as in,
+        # it will likely work without this, and since it is much harder to estimate than the expected width,
+        # and be a problem with for instance highly decaying signals and/or signals with significant noise,
+        # it should be the first thing to consider changing (not using) if we're failing to pick all peaks/troughs.
+        # also the use of HALF the calculated height of the middle-ish peak is entirely arbitrary and could
+        # be replaced with some other fraction of a trough to peak height, or from a different place in the signal.
         middle_sample = int(num_samples/2)
         signal_sample_1_cycle_start = middle_sample 
         signal_sample_1_cycle_end = signal_sample_1_cycle_start + int(expected_min_peak_width)
@@ -68,7 +213,14 @@ def peaksAndTroughsIndices(
     return (peaks, troughs)
 
 
-def ca2Data(path_to_data: str):
+def extremePointIndices(signal: np.ndarray) -> Tuple[np.ndarray]:
+    peaks, troughs = peakAndTroughIndices(signal)
+    peaks_and_troughs = np.concatenate((peaks, troughs), axis=0)
+    peaks_and_troughs_sorted = np.sort(peaks_and_troughs)
+    return (peaks, troughs, peaks_and_troughs_sorted)
+
+
+def ca2Data(path_to_data: str) -> Tuple[np.ndarray]:
     ''' Reads in an xlsx file containing ca2 experiment data and
         returns a tuple of numpy arrays (time stamps, signal) '''
     ca2_data = pd.read_excel(path_to_data, usecols=[1, 5], dtype=np.float32)
@@ -76,94 +228,12 @@ def ca2Data(path_to_data: str):
     return (ca2_data[0], ca2_data[1])
 
 
-# def extremePointIndices(signal: np.ndarray) -> Tuple[np.ndarray]:
-#     from sklearn.cluster import KMeans
-#     # peaks and troughs combined and sorted
-#     # cluster the (edge) distance between adjacent peaks and troughs
-#     # so we can eliminate the extreme points that have both edges
-#     # that belong to the cluster with "small" edges (they're noise)
-#     extreme_points_signal = signal[extreme_points]
-#     extreme_points_edge_distances = np.abs(np.diff(extreme_points_signal))
-#     extreme_points_signal = extreme_points_signal.tolist()
-#     extreme_points_distance_min = np.min(extreme_points_edge_distances)
-#     extreme_points_distance_max = np.max(extreme_points_edge_distances)
-#     initial_cluster_centers = np.asarray([extreme_points_distance_min, extreme_points_distance_max])
-#     kmeans_operator = KMeans(
-#         n_clusters=2,
-#         init=initial_cluster_centers.reshape(-1, 1),  # stupid sklearn requires this for 1D array
-#         n_init=1
-#     )
-#     extreme_points_cluster_ids = kmeans_operator.fit_predict(
-#         extreme_points_edge_distances.reshape(-1,1)  # stupid sklearn requires this for 1D array
-#     )
-#     cluster_center = kmeans_operator.cluster_centers_
-
-#     print(cluster_center)
-#     print(extreme_points_cluster_ids)
-    
-#     # determine which cluster contains small edge distances
-#     # these are edges that contribute to bad peaks/troughs (i.e. noise)
-#     if cluster_center[0] > cluster_center[1]:
-#         cluster_to_remove = 0
-#     else:
-#         cluster_to_remove = 1
-#     # remove any exteme points that have BOTH edge distances in the cluster_id_to_remove cluster
-#     to_be_removed = -1
-#     num_points_to_remove = 0
-#     # remove points in peaks and troughs and mark points to be removed in extreme_points/_signal
-#     for point_index in range(len(extreme_points_cluster_ids) - 1):
-#         if extreme_points_cluster_ids[point_index] == cluster_to_remove \
-#         and extreme_points_cluster_ids[point_index + 1] == cluster_to_remove:
-#             index_to_remove = extreme_points[point_index + 1]
-#             extreme_points[point_index + 1] = to_be_removed
-#             extreme_points_signal[point_index + 1] = to_be_removed
-#             num_points_to_remove += 1
-#             if index_to_remove in peaks:
-#                 peaks.remove(index_to_remove)
-#             else:
-#                 troughs.remove(index_to_remove)
-#     # remove points in extreme_points/_signal that were marked for removal
-#     print(f'num points to remove first round: {num_points_to_remove}')
-#     for _ in range(num_points_to_remove):
-#         extreme_points.remove(-1)
-#         extreme_points_signal.remove(-1)
-#     # now we need to look at each point and the point that follows
-#     # and if there are two peaks in a row, remove the peak that is lowest, 
-#     # and if there are two troughs in a row, remove the trough that is highest
-#     num_points_to_remove = 0
-#     for this_point_index in range(len(extreme_points) - 1):
-#         next_point_index = this_point_index + 1
-#         this_point = extreme_points[this_point_index]
-#         next_point = extreme_points[next_point_index]
-#         if this_point in peaks and next_point in peaks:
-#             this_point_signal = extreme_points_signal[this_point_index]
-#             next_point_signal = extreme_points_signal[next_point_index]
-#             if this_point_signal < next_point_signal:
-#                 peaks.remove(this_point)
-#                 extreme_points[this_point_index] = to_be_removed
-#                 extreme_points_signal[this_point_index] = to_be_removed
-#                 num_points_to_remove += 1                
-#             else:
-#                 peaks.remove(next_point)
-#                 extreme_points[next_point_index] = to_be_removed
-#                 extreme_points_signal[next_point_index] = to_be_removed
-#                 num_points_to_remove += 1
-#         elif this_point in troughs and next_point in troughs:
-#             this_point_signal = extreme_points_signal[this_point_index]
-#             next_point_signal = extreme_points_signal[next_point_index]
-#             if this_point_signal < next_point_signal:
-#                 troughs.remove(this_point)
-#                 extreme_points[this_point_index] = to_be_removed
-#                 extreme_points_signal[this_point_index] = to_be_removed
-#                 num_points_to_remove += 1
-#             else:
-#                 troughs.remove(next_point)
-#                 extreme_points[next_point_index] = to_be_removed
-#                 extreme_points_signal[next_point_index] = to_be_removed
-#                 num_points_to_remove += 1
-#     # remove points in extreme_points/_signal that were marked for removal
-#     print(f'num points to remove second round: {num_points_to_remove}')    
-#     for _ in range(num_points_to_remove):
-#         extreme_points.remove(-1)
-#         extreme_points_signal.remove(-1)
-#     return (extreme_points, peaks, troughs)
+def lowPassFiltered(input_signal: np.ndarray, time_stamps: np.ndarray) -> np.ndarray:
+    filter_order = 5  # how sharply the filter cuts off the larger the sharper it bends
+    # frequency_range_hz = [1.0, 2.0]  # cut off frequency [start, stop] for bandpass/bandstop
+    frequency_hz = 1.5
+    duration = time_stamps[-1] - time_stamps[0]
+    num_samples = len(time_stamps)
+    sampleing_frequency = float(num_samples)/duration
+    sos = butter(filter_order, frequency_hz, 'lowpass', fs=sampleing_frequency, output='sos')
+    return sosfilt(sos, input_signal)
