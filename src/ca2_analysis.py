@@ -1,9 +1,18 @@
+import os
+import glob
+import openpyxl
 import numpy as np
 import pandas as pd
+from datetime import datetime
 from typing import Tuple, Dict, List
-from scipy.signal import find_peaks, butter, sosfilt
 from numpy.polynomial.polynomial import polyfit, Polynomial
-# import openpyxl
+from scipy.signal import find_peaks, butter, sosfilt
+from tkinter import Tk as tk
+from tkinter.filedialog import askopenfilename, askdirectory
+
+import matplotlib.pyplot as plt
+pd.set_option("display.precision", 2)
+pd.set_option("display.expand_frame_repr", False)
 
 
 # TODO: check there are no double peaks or troughs.
@@ -36,6 +45,191 @@ from numpy.polynomial.polynomial import polyfit, Polynomial
 #       the alternative is to use splines which do essentially the same thing
 #       without having to explicitly code the linear interpolation, but since we have to 
 #       compute enough splines to for the resolution we need computationally very expensive
+
+
+def resultsToCSV(
+  ca2_analysis: Dict,
+  path_to_results_file: str,
+):    
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+
+    # unless we pass in the input signal and time stamps,
+    # the peak and trough indices are useless
+    # peak_indices = ca2_analysis['peak_indices'],
+    # trough_indices = ca2_analysis['trough_indices'],
+
+    heading_row = 1
+    p2p_order_type_column = 1
+    sheet.cell(heading_row, p2p_order_type_column).value = 'p2p_order'
+
+    metrics_column_start = p2p_order_type_column + 1
+    metric_fractions = ca2_analysis['metrics'][0]['metric_fractions']
+    num_metrics = len(metric_fractions)
+    for metric_num in range(num_metrics):
+        sheet.cell(
+            heading_row,
+            metrics_column_start + metric_num
+        ).value = 'avg time (s) to ' + str(round(metric_fractions[metric_num], 2))  + ' of max'
+    metrics_failures_column_start = metrics_column_start + num_metrics + 1 
+    for metric_num in range(num_metrics):
+        sheet.cell(
+            heading_row, 
+            metrics_failures_column_start + metric_num
+        ).value = 'failures (%) for avg time to ' + str(round(metric_fractions[metric_num], 2)) + ' of max'
+
+    data_start_row = heading_row + 1
+    num_rows = len(ca2_analysis['metrics'])
+    for p2p_row in range(num_rows):
+        metrics = ca2_analysis['metrics'][p2p_row]
+
+        row_num = data_start_row + p2p_row
+        sheet.cell(row_num, p2p_order_type_column).value = metrics['p2p_order']
+
+        # raw_p2p_metric_data = metrics['p2p_metric_data']  # 3 rows of n columns where n is the num p2p's
+        # note: xlsx will present high precision for numerical types regardless
+        # so if we want to limit the precision we need to use strings i.e. str(round(thing, 4))
+        for metric_num in range(num_metrics):
+            sheet.cell(
+                row_num,
+                metrics_column_start + metric_num
+            ).value = metrics['mean_metric_data'][metric_num]
+        for metric_num in range(num_metrics):
+            sheet.cell(
+                row_num, 
+                metrics_failures_column_start + metric_num
+            ).value = metrics['metric_failure_proportions'][metric_num]
+
+    workbook.save(filename=path_to_results_file)
+
+
+def analyzeCa2Data(
+    path_to_data: str,
+    expected_frequency_hz: float,
+    display_results: bool = False,
+    expected_min_peak_width: int = None,
+    expected_min_peak_height: float = None
+):
+
+    if path_to_data.lower() == 'select_file':
+        path_to_data = getFilePathViaGUI(window_title = 'Selet the file to analyze')
+    elif path_to_data.lower() == 'select_dir':
+        path_to_data = getDirPathViaGUI(window_title = 'Select the directory with files to analyze')
+
+    base_dir, files_to_analyze = contentsOfDir(dir_path=path_to_data, search_terms=['.xlsx'])
+    results_dir_name = "results_" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    results_dir = os.path.join(base_dir, results_dir_name) 
+    os.mkdir(results_dir)
+
+    for file_name, file_extension in files_to_analyze:
+        time_stamps, input_signal = ca2Data(os.path.join(base_dir, file_name + file_extension))
+        ca2_analysis = ca2Analysis(
+            input_signal,
+            time_stamps,
+            expected_frequency_hz = expected_frequency_hz,
+            expected_min_peak_width = expected_min_peak_width,
+            expected_min_peak_height = expected_min_peak_height
+        )
+
+        path_to_results_file = os.path.join(results_dir, file_name + '-results.xlsx')
+        resultsToCSV(
+            ca2_analysis,
+            path_to_results_file,
+        )
+
+        if display_results:
+            print()
+            print(f'metrics for {file_name}')
+            for metrics in ca2_analysis['metrics']:
+                p2p_order = metrics['p2p_order']
+                average_metrics = metrics['mean_metric_data']
+                metric_failure_proportions = metrics['metric_failure_proportions']
+                print(f'{p2p_order} average metrics (failure %): {average_metrics} ({metric_failure_proportions})')
+            plotCa2Signals(
+                time_stamps, 
+                input_signal,
+                ca2_analysis['peak_indices'],
+                ca2_analysis['trough_indices'],
+                file_name
+            )
+
+
+def plotCa2Signals(
+    time_stamps: np.ndarray,
+    signal: np.ndarray,
+    peak_indices: np.ndarray,
+    trough_indices: np.ndarray,
+    plot_title: str='',
+    plot_smoothed_signal: bool=True
+):
+    plt.title(plot_title)
+    if plot_smoothed_signal:
+        plt.plot(time_stamps, signal)
+    else:
+        plt.scatter(time_stamps, signal, s=2, facecolors='none', edgecolors='g')    
+    plt.scatter(time_stamps[peak_indices], signal[peak_indices], s=80, facecolors='none', edgecolors='b')
+    plt.scatter(time_stamps[trough_indices], signal[trough_indices], s=80, facecolors='none', edgecolors='r')
+    plt.show()
+
+
+def ca2Analysis(
+    value_data: np.ndarray,
+    time_stamps: np.ndarray=None,
+    expected_frequency_hz: float=None,
+    expected_min_peak_width: int=None,
+    expected_min_peak_height: float=None    
+) -> Dict:
+
+    peak_indices, trough_indices = peakAndTroughIndices(
+        value_data,
+        time_stamps,
+        expected_frequency_hz=expected_frequency_hz,
+        expected_min_peak_width=expected_min_peak_width,
+        expected_min_peak_height=expected_min_peak_height
+    )
+
+    first_peak_time = time_stamps[peak_indices[0]]
+    first_trough_time = time_stamps[trough_indices[0]]
+
+    # compute the trough to peak metrics
+    trough_sequence_start = 0
+    if first_trough_time < first_peak_time:
+        peak_sequence_start = 0
+    else:
+        peak_sequence_start = 1
+    num_troughs = len(trough_indices)
+    num_useable_peaks = len(peak_indices) - peak_sequence_start
+    num_troughs_to_use = min(num_troughs, num_useable_peaks)
+    trough_to_peak_metrics = pointToPointMetrics(
+        start_point_indices=trough_indices[trough_sequence_start: trough_sequence_start + num_troughs_to_use],
+        end_point_indices=peak_indices[peak_sequence_start: peak_sequence_start + num_troughs_to_use],
+        point_values=value_data,
+        point_times=time_stamps
+    )
+    trough_to_peak_metrics['p2p_order'] = 'trough_to_peak'
+
+    # compute the peak to trough metrics
+    peak_sequence_start = 0
+    if first_peak_time < first_trough_time:
+        trough_sequence_start = 0
+    else:
+        trough_sequence_start = 1
+    num_peaks = len(peak_indices)
+    num_useable_troughs = len(trough_indices) - trough_sequence_start
+    num_peaks_to_use = min(num_peaks, num_useable_troughs)
+    peak_to_trough_metrics = pointToPointMetrics(
+        start_point_indices=peak_indices[peak_sequence_start: peak_sequence_start + num_peaks_to_use],
+        end_point_indices=trough_indices[trough_sequence_start: trough_sequence_start + num_peaks_to_use],
+        point_values=value_data,
+        point_times=time_stamps
+    )
+    peak_to_trough_metrics['p2p_order'] = 'peak_to_trough'
+
+    return {
+        'peak_indices': peak_indices,
+        'trough_indices': trough_indices, 
+        'metrics': [trough_to_peak_metrics, peak_to_trough_metrics]
+    }
 
 
 def pointToPointMetrics(
@@ -101,74 +295,19 @@ def pointToPointMetrics(
     metrics_means = metrics_sums/metrics_counters
     metrics_failure_proportions = metric_failure_counter/num_point_values
     return {
+        'metric_fractions': np.append(endpoint_value_fractions, [1.0]),  # add the 100% case
         'p2p_metric_data': metrics,
         'mean_metric_data': metrics_means,
         'metric_failure_proportions': metrics_failure_proportions
     }
 
 
-def ca2Metrics(
-    value_data: np.ndarray,
-    time_stamps: np.ndarray=None,
-    expected_frequency_hz: float=None,
-    expected_min_peak_width: int=None,
-    expected_min_peak_height: float=None    
-) -> Tuple[Dict]:
-
-    peak_indices, trough_indices = peakAndTroughIndices(
-        value_data,
-        time_stamps,
-        expected_frequency_hz=expected_frequency_hz,
-        expected_min_peak_width=expected_min_peak_width,
-        expected_min_peak_height=expected_min_peak_height
-    )
-
-    first_peak_time = time_stamps[peak_indices[0]]
-    first_trough_time = time_stamps[trough_indices[0]]
-
-    # compute the trough to peak metrics
-    trough_sequence_start = 0
-    if first_trough_time < first_peak_time:
-        peak_sequence_start = 0
-    else:
-        peak_sequence_start = 1
-    num_troughs = len(trough_indices)
-    num_useable_peaks = len(peak_indices) - peak_sequence_start
-    num_troughs_to_use = min(num_troughs, num_useable_peaks)
-    trough_to_peak_metrics = pointToPointMetrics(
-        start_point_indices=trough_indices[trough_sequence_start: trough_sequence_start + num_troughs_to_use],
-        end_point_indices=peak_indices[peak_sequence_start: peak_sequence_start + num_troughs_to_use],
-        point_values=value_data,
-        point_times=time_stamps
-    )
-    trough_to_peak_metrics['p2p_order'] = 'trough_to_peak'
-
-    # compute the peak to trough metrics
-    peak_sequence_start = 0
-    if first_peak_time < first_trough_time:
-        trough_sequence_start = 0
-    else:
-        trough_sequence_start = 1
-    num_peaks = len(peak_indices)
-    num_useable_troughs = len(trough_indices) - trough_sequence_start
-    num_peaks_to_use = min(num_peaks, num_useable_troughs)
-    peak_to_trough_metrics = pointToPointMetrics(
-        start_point_indices=peak_indices[peak_sequence_start: peak_sequence_start + num_peaks_to_use],
-        end_point_indices=trough_indices[trough_sequence_start: trough_sequence_start + num_peaks_to_use],
-        point_values=value_data,
-        point_times=time_stamps
-    )
-    peak_to_trough_metrics['p2p_order'] = 'peak_to_trough'
-
-    return (trough_to_peak_metrics, peak_to_trough_metrics)
-
-
 def peakAndTroughIndices(
     input_data: np.ndarray,
-    time_stamps: np.ndarray=None,
-    expected_frequency_hz: float=None,
-    expected_min_peak_width: int=None,
-    expected_min_peak_height: float=None    
+    time_stamps: np.ndarray = None,
+    expected_frequency_hz: float = None,
+    expected_min_peak_width: int = None,
+    expected_min_peak_height: float = None
 ) -> Tuple[np.ndarray]:
     ''' Returns the indices of peaks and troughs found in the 1D input data '''
     if expected_min_peak_height is None:
@@ -178,9 +317,9 @@ def peakAndTroughIndices(
     
     if expected_frequency_hz is not None and time_stamps is not None:
         expected_frequency_hz = expected_frequency_hz
-        expected_frequency_range_hz = 0.5
-        pacing_frquency_min_hz = expected_frequency_hz - expected_frequency_range_hz
-        pacing_frquency_max_hz = expected_frequency_hz + expected_frequency_range_hz
+        expected_frequency_tolerance_hz = 0.5
+        pacing_frquency_min_hz = expected_frequency_hz - expected_frequency_tolerance_hz
+        pacing_frquency_max_hz = expected_frequency_hz + expected_frequency_tolerance_hz
 
         # compute the width (in samples) from peak to peak or trough to trough that we expect the
         # signal to contain so we can eliminate noise components we presume will be shorter than this
@@ -190,8 +329,8 @@ def peakAndTroughIndices(
         expected_min_peak_width = sampling_rate/pacing_frquency_max_hz
 
         # compute the height from trough to peak or peak to trough that we expect the signal to contain.
-        # we use this to eliminate noise components we pressume will be smaller than this.
-        # note: it is probably not necessary to pass this parameter to the peak finder; as in,
+        # we use this to eliminate noise components we presume will be smaller than this value.
+        # NOTE: it is probably not necessary to pass this parameter to the peak finder; as in,
         # it will likely work without this, and since it is much harder to estimate than the expected width,
         # and be a problem with for instance highly decaying signals and/or signals with significant noise,
         # it should be the first thing to consider changing (not using) if we're failing to pick all peaks/troughs.
@@ -237,3 +376,57 @@ def lowPassFiltered(input_signal: np.ndarray, time_stamps: np.ndarray) -> np.nda
     sampleing_frequency = float(num_samples)/duration
     sos = butter(filter_order, frequency_hz, 'lowpass', fs=sampleing_frequency, output='sos')
     return sosfilt(sos, input_signal)
+
+
+# below are copies of functions in mantavision and a separate function with these 
+# utility functions should be made in a separate repo, or these repos combined
+
+def contentsOfDir(dir_path: str, search_terms: List[str], search_extension_only: bool=True) -> Tuple[List[str], List[Tuple[str]]]:
+  all_files_found = []
+  if os.path.isdir(dir_path):
+    base_dir = dir_path
+    for search_term in search_terms:
+      glob_search_term = '*' + search_term
+      if not search_extension_only:
+        glob_search_term += '*'
+      files_found = glob.glob(os.path.join(dir_path, glob_search_term))
+      if len(files_found) > 0:
+        all_files_found.extend(files_found)
+  else:
+    # presume it's actually a single file path
+    base_dir = os.path.dirname(dir_path)
+    all_files_found = [dir_path]
+  if len(all_files_found) < 1:
+    return None, None
+
+  files = []
+  for file_path in all_files_found:
+      file_name, file_extension = os.path.splitext(os.path.basename(file_path))
+      files.append((file_name, file_extension))
+  return base_dir, files
+
+
+def getDirPathViaGUI(window_title: str='') -> str:
+  # show an "Open" dialog box and return the path to the selected dir
+  window=tk()
+  window.withdraw()
+  window.lift()
+  window.overrideredirect(True)
+  window.call('wm', 'attributes', '.', '-topmost', True)
+  return askdirectory(
+    initialdir='./',
+    title=window_title
+  )
+
+
+def getFilePathViaGUI(window_title: str='') -> str:
+  # show an "Open" dialog box and return the path to the selected file
+  window=tk()
+  window.withdraw()
+  window.lift()  
+  window.overrideredirect(True)
+  window.call('wm', 'attributes', '.', '-topmost', True)
+  return askopenfilename(
+    initialdir='./',
+    title=window_title    
+  ) 
