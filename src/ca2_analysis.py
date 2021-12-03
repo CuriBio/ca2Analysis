@@ -59,9 +59,9 @@ def resultsToCSV(
     heading_row = 1    
     metric_type_column = 1
     sheet.cell(heading_row, metric_type_column).value = 'metric type'
-    p2p_metric_column = metric_type_column + 1
-    sheet.cell(heading_row, p2p_metric_column).value = 'metric average'
-    num_points_column = p2p_metric_column + 1 
+    metric_value_column = metric_type_column + 1
+    sheet.cell(heading_row, metric_value_column).value = 'metric average'
+    num_points_column = metric_value_column + 1 
     sheet.cell(heading_row, num_points_column).value = 'num points'
     num_failed_points_column = num_points_column + 1 
     sheet.cell(heading_row, num_failed_points_column).value = 'num failed points'
@@ -83,10 +83,16 @@ def resultsToCSV(
         for metric_num in range(num_metrics):
             row_num = data_start_row + p2p_type_num*num_metrics + metric_num
             sheet.cell(row_num, metric_type_column).value = metric_labels[metric_num]
-            sheet.cell(row_num, p2p_metric_column).value = metric_values[metric_num]
+            sheet.cell(row_num, metric_value_column).value = metric_values[metric_num]
             sheet.cell(row_num, num_points_column).value = num_points
             sheet.cell(row_num, num_failed_points_column).value = num_failed_points[metric_num]
             sheet.cell(row_num, percent_failed_points_column).value = failure_percentages[metric_num]
+
+    # add a measure of average frquency
+    row_num += 2
+    avg_frequency = ca2_analysis['avg_frequency']
+    sheet.cell(row_num, metric_type_column).value = 'frequency'  
+    sheet.cell(row_num, metric_value_column).value = avg_frequency
 
     workbook.save(filename=path_to_results_file)
 
@@ -240,10 +246,15 @@ def ca2Analysis(
     trough_to_peak_metrics['p2p_order'] = 'trough_to_peak'
     trough_to_peak_metrics['metrics_labels'] = ['T50C', 'T90C', 'Tpeak']
 
+    # compute a measure of average frequency
+    peak_times = time_stamps[peak_indices]
+    avg_frequency = np.mean(np.diff(peak_times))
+
     return {
         'peak_indices': peak_indices,
         'trough_indices': trough_indices, 
-        'metrics': [trough_to_peak_metrics, peak_to_trough_metrics]
+        'metrics': [trough_to_peak_metrics, peak_to_trough_metrics],
+        'avg_frequency': avg_frequency
     }
 
 
