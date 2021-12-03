@@ -91,67 +91,11 @@ def resultsToCSV(
     workbook.save(filename=path_to_results_file)
 
 
-def resultsToCSVOld(
-  ca2_analysis: Dict,
-  path_to_results_file: str,
-):    
-    workbook = openpyxl.Workbook()
-    sheet = workbook.active
-
-    # unless we pass in the input signal and time stamps,
-    # the peak and trough indices are useless
-    # peak_indices = ca2_analysis['peak_indices'],
-    # trough_indices = ca2_analysis['trough_indices'],
-
-    heading_row = 1
-    p2p_order_type_column = 1
-    sheet.cell(heading_row, p2p_order_type_column).value = 'p2p_order'
-
-    metrics_column_start = p2p_order_type_column + 1
-    metrics_labels = ca2_analysis['metrics'][0]['metrics_labels']
-    num_metrics = len(metrics_labels)
-    for metric_num in range(num_metrics):
-        sheet.cell(
-            heading_row,
-            metrics_column_start + metric_num
-        ).value = metrics_labels[metric_num]
-
-    metrics_failures_column_start = metrics_column_start + num_metrics + 1 
-    for metric_num in range(num_metrics):
-        sheet.cell(
-            heading_row, 
-            metrics_failures_column_start + metric_num
-        ).value = metrics_labels[metric_num] + ' (%) failures'
-
-    data_start_row = heading_row + 1
-    num_rows = len(ca2_analysis['metrics'])
-    for p2p_row in range(num_rows):
-        metrics = ca2_analysis['metrics'][p2p_row]
-
-        row_num = data_start_row + p2p_row
-        sheet.cell(row_num, p2p_order_type_column).value = metrics['p2p_order']
-
-        # raw_p2p_metric_data = metrics['p2p_metric_data']  # 3 rows of n columns where n is the num p2p's
-        # note: xlsx will present high precision for numerical types regardless
-        # so if we want to limit the precision we need to use strings i.e. str(round(thing, 4))
-        for metric_num in range(num_metrics):
-            sheet.cell(
-                row_num,
-                metrics_column_start + metric_num
-            ).value = metrics['mean_metric_data'][metric_num]
-        for metric_num in range(num_metrics):
-            sheet.cell(
-                row_num, 
-                metrics_failures_column_start + metric_num
-            ).value = metrics['metric_failure_proportions'][metric_num]
-
-    workbook.save(filename=path_to_results_file)
-
-
 def analyzeCa2Data(
     path_to_data: str,
     expected_frequency_hz: float,
     display_results: bool = False,
+    save_result_plots: bool = False,
     expected_min_peak_width: int = None,
     expected_min_peak_height: float = None
 ):
@@ -189,13 +133,22 @@ def analyzeCa2Data(
                 p2p_order = metrics['p2p_order']
                 average_metrics = metrics['mean_metric_data']
                 metric_failure_proportions = metrics['metric_failure_proportions']
-                print(f'{p2p_order} average metrics (failure %): {average_metrics} ({metric_failure_proportions})')
+                if display_results:
+                    print(f'{p2p_order} average metrics (failure %): {average_metrics} ({metric_failure_proportions})')
+
+        if display_results or save_result_plots is not None:
+            if save_result_plots:
+                plot_file_path = os.path.join(results_dir, file_name + '-plot.png')
+            else:
+                plot_file_path = None
             plotCa2Signals(
                 time_stamps, 
                 input_signal,
                 ca2_analysis['peak_indices'],
                 ca2_analysis['trough_indices'],
-                file_name
+                file_name,
+                display_results=display_results,
+                plot_file_path=plot_file_path
             )
 
 
@@ -205,8 +158,11 @@ def plotCa2Signals(
     peak_indices: np.ndarray,
     trough_indices: np.ndarray,
     plot_title: str='',
-    plot_smoothed_signal: bool=True
+    plot_smoothed_signal: bool=True,
+    display_results: bool = True,
+    plot_file_path: str = None
 ):
+    plt.suptitle('Ca2+ Activity')
     plt.title(plot_title)
     if plot_smoothed_signal:
         plt.plot(time_stamps, signal)
@@ -214,7 +170,15 @@ def plotCa2Signals(
         plt.scatter(time_stamps, signal, s=2, facecolors='none', edgecolors='g')    
     plt.scatter(time_stamps[peak_indices], signal[peak_indices], s=80, facecolors='none', edgecolors='b')
     plt.scatter(time_stamps[trough_indices], signal[trough_indices], s=80, facecolors='none', edgecolors='r')
-    plt.show()
+    plt.xlabel('Time (seconds)')
+    plt.ylabel('Signal Intensity')
+    if plot_file_path is not None:
+        # NOTE: do NOT change the order of saving and showing the plot
+        #       the plots will be blank if save is not performed first
+        plt.savefig(fname=plot_file_path, format='png', facecolor='white', transparent=False, dpi=400.0)
+    if display_results:
+        plt.show()
+    plt.close()
 
 
 def ca2Analysis(
