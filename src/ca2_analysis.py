@@ -47,7 +47,51 @@ pd.set_option("display.expand_frame_repr", False)
 #       compute enough splines to for the resolution we need computationally very expensive
 
 
+
 def resultsToCSV(
+  ca2_analysis: Dict,
+  path_to_results_file: str,
+):    
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+
+    # set the column headings
+    heading_row = 1    
+    metric_type_column = 1
+    sheet.cell(heading_row, metric_type_column).value = 'metric type'
+    p2p_metric_column = metric_type_column + 1
+    sheet.cell(heading_row, p2p_metric_column).value = 'metric average'
+    num_points_column = p2p_metric_column + 1 
+    sheet.cell(heading_row, num_points_column).value = 'num points'
+    num_failed_points_column = num_points_column + 1 
+    sheet.cell(heading_row, num_failed_points_column).value = 'num failed points'
+    percent_failed_points_column = num_failed_points_column + 1 
+    sheet.cell(heading_row, percent_failed_points_column).value = '% failed points'
+
+    # set the column values for each metric
+    data_start_row = heading_row + 1
+    num_p2p_types = len(ca2_analysis['metrics'])
+    for p2p_type_num in range(num_p2p_types):
+        metrics = ca2_analysis['metrics'][p2p_type_num]
+        metric_labels = metrics['metrics_labels']
+        metric_values = metrics['mean_metric_data']
+        num_points = metrics['num_metric_points']
+        num_failed_points = metrics['num_metric_failures']         
+        failure_percentages = metrics['metric_failure_proportions']
+
+        num_metrics = len(metric_values)
+        for metric_num in range(num_metrics):
+            row_num = data_start_row + p2p_type_num*num_metrics + metric_num
+            sheet.cell(row_num, metric_type_column).value = metric_labels[metric_num]
+            sheet.cell(row_num, p2p_metric_column).value = metric_values[metric_num]
+            sheet.cell(row_num, num_points_column).value = num_points
+            sheet.cell(row_num, num_failed_points_column).value = num_failed_points[metric_num]
+            sheet.cell(row_num, percent_failed_points_column).value = failure_percentages[metric_num]
+
+    workbook.save(filename=path_to_results_file)
+
+
+def resultsToCSVOld(
   ca2_analysis: Dict,
   path_to_results_file: str,
 ):    
@@ -64,19 +108,20 @@ def resultsToCSV(
     sheet.cell(heading_row, p2p_order_type_column).value = 'p2p_order'
 
     metrics_column_start = p2p_order_type_column + 1
-    metric_fractions = ca2_analysis['metrics'][0]['metric_fractions']
-    num_metrics = len(metric_fractions)
+    metrics_labels = ca2_analysis['metrics'][0]['metrics_labels']
+    num_metrics = len(metrics_labels)
     for metric_num in range(num_metrics):
         sheet.cell(
             heading_row,
             metrics_column_start + metric_num
-        ).value = 'avg time (s) to ' + str(round(metric_fractions[metric_num], 2))  + ' of max'
+        ).value = metrics_labels[metric_num]
+
     metrics_failures_column_start = metrics_column_start + num_metrics + 1 
     for metric_num in range(num_metrics):
         sheet.cell(
             heading_row, 
             metrics_failures_column_start + metric_num
-        ).value = 'failures (%) for avg time to ' + str(round(metric_fractions[metric_num], 2)) + ' of max'
+        ).value = metrics_labels[metric_num] + ' (%) failures'
 
     data_start_row = heading_row + 1
     num_rows = len(ca2_analysis['metrics'])
@@ -191,22 +236,7 @@ def ca2Analysis(
     first_peak_time = time_stamps[peak_indices[0]]
     first_trough_time = time_stamps[trough_indices[0]]
 
-    # compute the trough to peak metrics
-    trough_sequence_start = 0
-    if first_trough_time < first_peak_time:
-        peak_sequence_start = 0
-    else:
-        peak_sequence_start = 1
-    num_troughs = len(trough_indices)
-    num_useable_peaks = len(peak_indices) - peak_sequence_start
-    num_troughs_to_use = min(num_troughs, num_useable_peaks)
-    trough_to_peak_metrics = pointToPointMetrics(
-        start_point_indices=trough_indices[trough_sequence_start: trough_sequence_start + num_troughs_to_use],
-        end_point_indices=peak_indices[peak_sequence_start: peak_sequence_start + num_troughs_to_use],
-        point_values=value_data,
-        point_times=time_stamps
-    )
-    trough_to_peak_metrics['p2p_order'] = 'trough_to_peak'
+    endpoint_value_fractions = np.asarray([0.5, 0.9], dtype=np.float32)  
 
     # compute the peak to trough metrics
     peak_sequence_start = 0
@@ -221,9 +251,30 @@ def ca2Analysis(
         start_point_indices=peak_indices[peak_sequence_start: peak_sequence_start + num_peaks_to_use],
         end_point_indices=trough_indices[trough_sequence_start: trough_sequence_start + num_peaks_to_use],
         point_values=value_data,
-        point_times=time_stamps
+        point_times=time_stamps,
+        endpoint_value_fractions=endpoint_value_fractions
     )
     peak_to_trough_metrics['p2p_order'] = 'peak_to_trough'
+    peak_to_trough_metrics['metrics_labels'] = ['T50R', 'T90R', 'T100R']
+
+    # compute the trough to peak metrics
+    trough_sequence_start = 0
+    if first_trough_time < first_peak_time:
+        peak_sequence_start = 0
+    else:
+        peak_sequence_start = 1
+    num_troughs = len(trough_indices)
+    num_useable_peaks = len(peak_indices) - peak_sequence_start
+    num_troughs_to_use = min(num_troughs, num_useable_peaks)
+    trough_to_peak_metrics = pointToPointMetrics(
+        start_point_indices=trough_indices[trough_sequence_start: trough_sequence_start + num_troughs_to_use],
+        end_point_indices=peak_indices[peak_sequence_start: peak_sequence_start + num_troughs_to_use],
+        point_values=value_data,
+        point_times=time_stamps,
+        endpoint_value_fractions=endpoint_value_fractions        
+    )
+    trough_to_peak_metrics['p2p_order'] = 'trough_to_peak'
+    trough_to_peak_metrics['metrics_labels'] = ['T50C', 'T90C', 'Tpeak']
 
     return {
         'peak_indices': peak_indices,
@@ -236,10 +287,10 @@ def pointToPointMetrics(
     start_point_indices: np.ndarray,
     end_point_indices: np.ndarray,
     point_values: np.ndarray,
-    point_times: np.ndarray
+    point_times: np.ndarray,
+    endpoint_value_fractions: np.ndarray  # don't include a 1.0 case since we always perform this
 ) -> Dict:
-    endpoint_value_fractions = np.asarray([0.5, 0.9], dtype=np.float32)
-    num_metrics_to_compute = len(endpoint_value_fractions) + 1  # +1 for 100% case
+    num_metrics_to_compute = len(endpoint_value_fractions) + 1  # +1 for 100% case we always perform
     num_point_values = len(start_point_indices)
     metrics = np.zeros(shape=(num_metrics_to_compute, num_point_values), dtype=np.float32)
     metric_failure_counter = np.zeros(shape=(num_metrics_to_compute), dtype=np.float32)
@@ -290,6 +341,7 @@ def pointToPointMetrics(
                 break
             metric_failure_counter[fraction_id_to_add] += failure_count
 
+
     metrics_counters = np.abs(metric_failure_counter - num_point_values)
     metrics_sums = np.sum(metrics, axis=-1)
     metrics_means = metrics_sums/metrics_counters
@@ -298,6 +350,8 @@ def pointToPointMetrics(
         'metric_fractions': np.append(endpoint_value_fractions, [1.0]),  # add the 100% case
         'p2p_metric_data': metrics,
         'mean_metric_data': metrics_means,
+        'num_metric_failures': metric_failure_counter,
+        'num_metric_points': num_point_values,
         'metric_failure_proportions': metrics_failure_proportions
     }
 
