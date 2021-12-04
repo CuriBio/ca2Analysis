@@ -61,7 +61,9 @@ def resultsToCSV(
     sheet.cell(heading_row, metric_type_column).value = 'metric type'
     metric_value_column = metric_type_column + 1
     sheet.cell(heading_row, metric_value_column).value = 'metric average'
-    num_points_column = metric_value_column + 1 
+    normalized_metric_value_column = metric_value_column + 1
+    sheet.cell(heading_row, normalized_metric_value_column).value = 'normalized metric average'
+    num_points_column = normalized_metric_value_column + 1 
     sheet.cell(heading_row, num_points_column).value = 'num points'
     num_failed_points_column = num_points_column + 1 
     sheet.cell(heading_row, num_failed_points_column).value = 'num failed points'
@@ -75,6 +77,7 @@ def resultsToCSV(
         metrics = ca2_analysis['metrics'][p2p_type_num]
         metric_labels = metrics['metrics_labels']
         metric_values = metrics['mean_metric_data']
+        normalized_metric_values = metrics['normalized_metric_data'] 
         num_points = metrics['num_metric_points']
         num_failed_points = metrics['num_metric_failures']         
         failure_percentages = metrics['metric_failure_proportions']
@@ -84,6 +87,7 @@ def resultsToCSV(
             row_num = data_start_row + p2p_type_num*num_metrics + metric_num
             sheet.cell(row_num, metric_type_column).value = metric_labels[metric_num]
             sheet.cell(row_num, metric_value_column).value = metric_values[metric_num]
+            sheet.cell(row_num, normalized_metric_value_column).value = normalized_metric_values[metric_num]
             sheet.cell(row_num, num_points_column).value = num_points
             sheet.cell(row_num, num_failed_points_column).value = num_failed_points[metric_num]
             sheet.cell(row_num, percent_failed_points_column).value = failure_percentages[metric_num]
@@ -268,21 +272,28 @@ def pointToPointMetrics(
     num_metrics_to_compute = len(endpoint_value_fractions) + 1  # +1 for 100% case we always perform
     num_point_values = len(start_point_indices)
     metrics = np.zeros(shape=(num_metrics_to_compute, num_point_values), dtype=np.float32)
+    normalized_metrics = metrics.copy()
     metric_failure_counter = np.zeros(shape=(num_metrics_to_compute), dtype=np.float32)
 
     for point_index in range(len(start_point_indices)):
         start_point_index = start_point_indices[point_index]
         end_point_index = end_point_indices[point_index] + 1
-        start_time = point_times[start_point_index]
-        points_to_fit_poly_at = point_times[start_point_index:end_point_index] - start_time  # shift times to 0
-        value_of_points_to_fit = point_values[start_point_index:end_point_index]
+        # shift times and values to 0 start/reference
+        points_to_fit_poly_at = point_times[start_point_index:end_point_index] - point_times[start_point_index]
+        value_of_points_to_fit = point_values[start_point_index:end_point_index] - point_values[start_point_index]
 
-        start_time = points_to_fit_poly_at[0]
-        end_time = points_to_fit_poly_at[-1]
-        metrics[-1, point_index] = end_time
-        
+        # the time to 100% (endpoint_value_fractions = 1.0) can just be read from the data.
+        # a polynomial fit to estimate this time can be wrong because end points for the fit
+        # don't always go through the real end points. plus it's a waste of compute time.
+        start_point_time = points_to_fit_poly_at[0]
+        end_point_time = points_to_fit_poly_at[-1]
+        metrics[-1, point_index] = end_point_time
+        end_point_value = value_of_points_to_fit[-1]
+        normalized_metrics[-1, point_index] = end_point_time/np.abs(end_point_value)
+
         num_points_for_fit = len(points_to_fit_poly_at)
-        if num_points_for_fit > 5:
+        min_points_for_3rd_deg_poly = 6  # arbitrary value. empirically determine on a small data set.
+        if num_points_for_fit >= min_points_for_3rd_deg_poly:
             polyfit_deg = 3
         else:
             polyfit_deg = 2
@@ -291,43 +302,43 @@ def pointToPointMetrics(
             points_to_fit_poly_at,
             value_of_points_to_fit,
             polyfit_deg,
-            domain=[start_time, end_time],
-            window=[start_time, end_time]
+            domain=[start_point_time, end_point_time],
+            window=[start_point_time, end_point_time]
         )
         poly = Polynomial(polyfit_of_values.convert().coef)
         
-        start_point_time = points_to_fit_poly_at[0]
-        end_point_time = points_to_fit_poly_at[-1]
-        start_point_value = value_of_points_to_fit[0]
-        end_point_value = value_of_points_to_fit[-1]
-        point_to_point_value = end_point_value - start_point_value
         for fraction_id_to_add in range(len(endpoint_value_fractions)):
             fraction_of_value = endpoint_value_fractions[fraction_id_to_add]
-            fractional_value = start_point_value + fraction_of_value*point_to_point_value
-            roots = Polynomial.roots(poly - fractional_value)
+            fraction_of_p2p_diff = fraction_of_value*end_point_value
+            roots = Polynomial.roots(poly - fraction_of_p2p_diff)
             failure_count = 1.0
-            for root in roots:
-                if np.iscomplex(root):
-                    continue  # only true if imaginary part is non zero (could still be a complex num object) 
-                if root < start_point_time or root > end_point_time:
+            for fraction_point_time in roots:
+                if np.iscomplex(fraction_point_time):
+                    continue  # imaginary part must be non zero so we can't use it 
+                if fraction_point_time < start_point_time or fraction_point_time > end_point_time:
                     continue
-                metrics[fraction_id_to_add, point_index] = np.real(root)  # could be complex num obj with imaginary part 0
+                # could still have a complex num obj with imaginary part 0 so force to be real
+                fraction_point_time = np.real(fraction_point_time)
+                metrics[fraction_id_to_add, point_index] = fraction_point_time
+                normalized_metrics[fraction_id_to_add, point_index] = fraction_point_time/np.abs(fraction_of_p2p_diff)
                 failure_count = 0.0
                 break
             metric_failure_counter[fraction_id_to_add] += failure_count
 
-
     metrics_counters = np.abs(metric_failure_counter - num_point_values)
     metrics_sums = np.sum(metrics, axis=-1)
     metrics_means = metrics_sums/metrics_counters
+    normalized_metrics_sums = np.sum(normalized_metrics, axis=-1)
+    normalized_metrics_sums_means = normalized_metrics_sums/metrics_counters
     metrics_failure_proportions = metric_failure_counter/num_point_values
     return {
-        'metric_fractions': np.append(endpoint_value_fractions, [1.0]),  # add the 100% case
-        'p2p_metric_data': metrics,
-        'mean_metric_data': metrics_means,
-        'num_metric_failures': metric_failure_counter,
-        'num_metric_points': num_point_values,
-        'metric_failure_proportions': metrics_failure_proportions
+        'metric_fractions':             np.append(endpoint_value_fractions, [1.0]),  # add the 100% case
+        'p2p_metric_data':              metrics,
+        'mean_metric_data':             metrics_means,
+        'normalized_metric_data':       normalized_metrics_sums_means,
+        'num_metric_failures':          metric_failure_counter,
+        'num_metric_points':            num_point_values,
+        'metric_failure_proportions':   metrics_failure_proportions
     }
 
 
