@@ -71,7 +71,7 @@ def resultsToCSV(
     sheet.cell(heading_row, percent_failed_points_column).value = '% failed points'
 
     # set the column values for each metric
-    data_start_row = heading_row + 1
+    row_num = heading_row + 1
     num_p2p_types = len(ca2_analysis['metrics'])
     for p2p_type_num in range(num_p2p_types):
         metrics = ca2_analysis['metrics'][p2p_type_num]
@@ -84,16 +84,16 @@ def resultsToCSV(
 
         num_metrics = len(metric_values)
         for metric_num in range(num_metrics):
-            row_num = data_start_row + p2p_type_num*num_metrics + metric_num
             sheet.cell(row_num, metric_type_column).value = metric_labels[metric_num]
             sheet.cell(row_num, metric_value_column).value = metric_values[metric_num]
             sheet.cell(row_num, normalized_metric_value_column).value = normalized_metric_values[metric_num]
             sheet.cell(row_num, num_points_column).value = num_points
             sheet.cell(row_num, num_failed_points_column).value = num_failed_points[metric_num]
             sheet.cell(row_num, percent_failed_points_column).value = failure_percentages[metric_num]
-
+            row_num += 1
+    
     # add a measure of average frquency
-    row_num += 2
+    row_num += 1
     avg_frequency = ca2_analysis['avg_frequency']
     sheet.cell(row_num, metric_type_column).value = 'frequency'  
     sheet.cell(row_num, metric_value_column).value = avg_frequency
@@ -210,9 +210,8 @@ def ca2Analysis(
     first_peak_time = time_stamps[peak_indices[0]]
     first_trough_time = time_stamps[trough_indices[0]]
 
-    endpoint_value_fractions = np.asarray([0.5, 0.9], dtype=np.float32)  
-
     # compute the peak to trough metrics
+    p2t_value_fractions = np.asarray([0.5, 0.9], dtype=np.float32)  
     peak_sequence_start = 0
     if first_peak_time < first_trough_time:
         trough_sequence_start = 0
@@ -226,12 +225,13 @@ def ca2Analysis(
         end_point_indices=trough_indices[trough_sequence_start: trough_sequence_start + num_peaks_to_use],
         point_values=value_data,
         point_times=time_stamps,
-        endpoint_value_fractions=endpoint_value_fractions
+        endpoint_value_fractions=p2t_value_fractions
     )
     peak_to_trough_metrics['p2p_order'] = 'peak_to_trough'
     peak_to_trough_metrics['metrics_labels'] = ['T50R', 'T90R', 'T100R']
 
     # compute the trough to peak metrics
+    t2p_value_fractions = np.zeros(0, dtype=np.float32)
     trough_sequence_start = 0
     if first_trough_time < first_peak_time:
         peak_sequence_start = 0
@@ -245,10 +245,10 @@ def ca2Analysis(
         end_point_indices=peak_indices[peak_sequence_start: peak_sequence_start + num_troughs_to_use],
         point_values=value_data,
         point_times=time_stamps,
-        endpoint_value_fractions=endpoint_value_fractions        
+        endpoint_value_fractions=t2p_value_fractions        
     )
     trough_to_peak_metrics['p2p_order'] = 'trough_to_peak'
-    trough_to_peak_metrics['metrics_labels'] = ['T50C', 'T90C', 'Tpeak']
+    trough_to_peak_metrics['metrics_labels'] = ['Tpeak']
 
     # compute a measure of average frequency
     peak_times = time_stamps[peak_indices]
